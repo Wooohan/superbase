@@ -1,11 +1,11 @@
 
 /**
- * Supabase Cloud Relay v3.6
+ * Supabase Cloud Relay v3.8
  * Project: fiuodbhgvmylvbanbfve
  */
 
 const SUPABASE_URL = "https://fiuodbhgvmylvbanbfve.supabase.co";
-// Using the 'messenger' secret key provided in your screenshots
+// Using the 'messenger' secret key exactly as shown in your settings screenshot
 const SUPABASE_KEY = "sb_secret_x33xGa8YmioWvfyvDtWNXA_fT_8VL9V_";
 
 export default async function handler(req, res) {
@@ -26,6 +26,8 @@ export default async function handler(req, res) {
   }
 
   const table = collection || 'provisioning_logs';
+  
+  // Standard headers for all Supabase Data API requests
   const headers = {
     'apikey': SUPABASE_KEY,
     'Authorization': `Bearer ${SUPABASE_KEY}`,
@@ -36,31 +38,41 @@ export default async function handler(req, res) {
   try {
     switch (action) {
       case 'ping':
-        // We probe the root to check if the key is valid.
-        // If the key is valid, Supabase returns 200/204.
-        // If the tables are missing, specific table queries return 404.
-        const probe = await fetch(`${SUPABASE_URL}/rest/v1/`, { 
+        // Querying 'agents' table specifically, as confirmed working in your Python script.
+        // This confirms the Key has full Service Role access to the data layer.
+        const probe = await fetch(`${SUPABASE_URL}/rest/v1/agents?select=id&limit=1`, { 
           method: 'GET', 
-          headers: { 'apikey': SUPABASE_KEY } 
+          headers: {
+            'apikey': SUPABASE_KEY,
+            'Authorization': `Bearer ${SUPABASE_KEY}`
+          } 
         });
         
+        // 200/204 = Table exists and key is valid.
+        // 404 = Key is valid but table doesn't exist (Setup needed).
+        // 401/403 = Key is rejected.
         const isAuthorized = probe.status !== 401 && probe.status !== 403;
+        const schemaReady = probe.status === 200 || probe.status === 204;
         
         return res.status(200).json({ 
           ok: isAuthorized,
           status: probe.status,
+          schemaReady: schemaReady,
           project: 'fiuodbhgvmylvbanbfve',
-          details: isAuthorized ? "Handshake successful" : "Key rejected by Supabase"
+          details: isAuthorized ? "Handshake successful" : "Supabase rejected the secret key. Check your Service Role settings."
         });
 
       case 'find':
         const queryUrl = `${SUPABASE_URL}/rest/v1/${table}${filter?.id ? `?id=eq.${filter.id}` : '?select=*'}`;
-        const findRes = await fetch(queryUrl, { method: 'GET', headers });
+        const findRes = await fetch(queryUrl, { 
+          method: 'GET', 
+          headers 
+        });
         
         if (!findRes.ok) {
            const errText = await findRes.text();
            return res.status(findRes.status).json({ 
-             error: `Query Failed: ${table}`, 
+             error: `Table [${table}] Error`, 
              details: errText,
              status: findRes.status 
            });
@@ -91,7 +103,10 @@ export default async function handler(req, res) {
       case 'deleteOne':
         const delRes = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${filter.id}`, {
           method: 'DELETE',
-          headers: { ...headers, 'Prefer': 'return=minimal' }
+          headers: { 
+            ...headers, 
+            'Prefer': 'return=minimal' 
+          }
         });
         return res.status(200).json({ ok: delRes.ok });
 
@@ -100,7 +115,10 @@ export default async function handler(req, res) {
         const stats = await Promise.all(tables.map(async (t) => {
           const check = await fetch(`${SUPABASE_URL}/rest/v1/${t}?select=count`, { 
             method: 'GET', 
-            headers: { ...headers, 'Prefer': 'count=exact' } 
+            headers: { 
+              ...headers, 
+              'Prefer': 'count=exact' 
+            } 
           });
           return { 
             name: t, 
