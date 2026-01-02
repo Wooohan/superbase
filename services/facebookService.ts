@@ -1,4 +1,3 @@
-
 import { FacebookPage, Conversation, Message, ConversationStatus } from '../types';
 
 /**
@@ -104,16 +103,12 @@ export const verifyPageAccessToken = async (pageId: string, accessToken: string)
   }
 };
 
-/**
- * Enhanced fetch with limit and avatar suppression support.
- */
 export const fetchPageConversations = async (
   pageId: string, 
   pageAccessToken: string, 
   limit: number = 100,
   includeAvatars: boolean = true
 ): Promise<Conversation[]> => {
-  // If avatars aren't needed, don't even request participants to avoid User/picture calls
   const fields = includeAvatars 
     ? 'id,snippet,updated_time,participants{id,name,picture.type(large)},unread_count'
     : 'id,snippet,updated_time,unread_count';
@@ -177,18 +172,35 @@ export const fetchThreadMessages = async (conversationId: string, pageId: string
   }).reverse();
 };
 
-export const sendPageMessage = async (recipientId: string, text: string, pageAccessToken: string) => {
+/**
+ * Sends a message. Uses MESSAGE_TAG (HUMAN_AGENT) if tag is provided, 
+ * which extends the allowed window to 7 days.
+ */
+export const sendPageMessage = async (recipientId: string, text: string, pageAccessToken: string, tag?: string) => {
   const url = `https://graph.facebook.com/v22.0/me/messages?access_token=${pageAccessToken}`;
+  
+  const payload: any = {
+    recipient: { id: recipientId },
+    message: { text },
+    messaging_type: tag ? "MESSAGE_TAG" : "RESPONSE"
+  };
+
+  if (tag) {
+    payload.tag = tag;
+  }
+
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      recipient: { id: recipientId },
-      message: { text },
-      messaging_type: "RESPONSE"
-    })
+    body: JSON.stringify(payload)
   });
+  
   const data = await response.json();
-  if (data.error) throw new Error(data.error.message);
+  if (data.error) {
+    const err = new Error(data.error.message);
+    (err as any).code = data.error.code;
+    (err as any).subcode = data.error.error_subcode;
+    throw err;
+  }
   return data;
 };
