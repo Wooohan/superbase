@@ -104,18 +104,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const loadDataFromCloud = async () => {
     setDbStatus('syncing');
     setDbError(null);
-    addLog('info', 'Probing Supabase REST Gateway...');
+    addLog('info', 'Probing Supabase Data API...');
     
     try {
-      const isAlive = await apiService.ping();
-      if (!isAlive) {
-        addLog('error', 'Critical: Supabase Authentication Failed.', 'Check your Service Key and URL.');
+      // Improved ping check
+      const res = await fetch('/api/db', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'ping' })
+      });
+      const pingResult = await res.json();
+
+      if (!pingResult.ok) {
+        addLog('error', 'Auth Failed', 'Gateway rejected the API Key (401/403). Ensure you use the Service Role JWT.');
         setDbStatus('error');
         setDbError("Supabase Key rejected. Check Project Settings.");
         return;
       }
       
-      addLog('success', 'Handshake Verified. Pulling operational datasets...');
+      addLog('success', 'Handshake Verified. Checking schema...');
       
       try {
         const [agentsData, pagesData, convsData, msgsData, linksData, mediaData] = await Promise.all([
@@ -135,11 +142,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setApprovedMedia(mediaData);
         
         setDbStatus('connected');
-        addLog('success', 'Portal Synchronized Successfully.');
+        addLog('success', 'Portal Synchronized.');
       } catch (innerErr: any) {
-        if (innerErr.status === 404 || innerErr.message.includes('not found')) {
+        // If the key is valid but tables are missing (404)
+        if (innerErr.status === 404 || innerErr.message.toLowerCase().includes('not found')) {
            setDbStatus('uninitialized');
-           addLog('error', 'Database Tables Missing', 'Run the SQL script in Supabase to create required tables.');
+           addLog('error', 'Tables Not Found', 'Key is valid, but schema is missing. Run the SQL script.');
            return;
         }
         throw innerErr;
@@ -154,7 +162,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setDbStatus('error');
       setDbError(err.message);
       addLog('error', 'Sync Failure', err.message);
-      console.error("Cloud Sync Error:", err);
     }
   };
 
@@ -192,7 +199,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     },
     agents,
     addAgent: async (a) => { 
-      addLog('info', `Provisioning agent ${a.name}...`);
       await apiService.put('agents', a); 
       setAgents(prev => [...prev, a]); 
     },
