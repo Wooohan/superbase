@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Send, X, Link as LinkIcon, Image as ImageIcon, Library, AlertCircle, ChevronDown, Check, MessageSquare, Loader2, Trash2, ShieldAlert } from 'lucide-react';
+import { Send, X, Link as LinkIcon, Image as ImageIcon, Library, AlertCircle, ChevronDown, Check, MessageSquare, Loader2, Trash2, ShieldAlert, Clock, Info, Zap } from 'lucide-react';
 import { Conversation, Message, ApprovedLink, ApprovedMedia, UserRole, ConversationStatus } from '../../types';
 import { useApp } from '../../store/AppContext';
 import { sendPageMessage, fetchThreadMessages } from '../../services/facebookService';
@@ -24,11 +24,7 @@ const CachedAvatar: React.FC<{ conversation: Conversation, className?: string }>
 
   if (url) {
     return (
-      <img 
-        src={url} 
-        className={className} 
-        alt="" 
-      />
+      <img src={url} className={className} alt="" />
     );
   }
 
@@ -44,30 +40,41 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
   const [inputText, setInputText] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isLoadingMessages, setIsLoadingMessages] = useState(false);
-  const [lastError, setLastError] = useState<string | null>(null);
+  const [lastError, setLastError] = useState<{message: string, isPolicy?: boolean} | null>(null);
   const [showLibrary, setShowLibrary] = useState(false);
   const [showStatusMenu, setShowStatusMenu] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const threadPollRef = useRef<number | null>(null);
 
   const isAdmin = currentUser?.role === UserRole.SUPER_ADMIN;
+
+  const isWindowExpired = useMemo(() => {
+    const lastTime = new Date(conversation.lastTimestamp).getTime();
+    const now = new Date().getTime();
+    return (now - lastTime) > (24 * 60 * 60 * 1000);
+  }, [conversation.lastTimestamp]);
+
   const chatMessages = useMemo(() => 
     messages
       .filter(m => m.conversationId === conversation.id)
       .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
   , [messages, conversation.id]);
 
+  // High-frequency polling for ACTIVE thread (every 4s)
   useEffect(() => {
     let isMounted = true;
+    
     const syncThread = async () => {
       const page = pages.find(p => p.id === conversation.pageId);
       if (!page?.accessToken) return;
 
-      if (chatMessages.length === 0) setIsLoadingMessages(true);
       try {
         const metaMsgs = await fetchThreadMessages(conversation.id, page.id, page.accessToken);
         if (isMounted) {
-          for (const msg of metaMsgs) {
-            if (!messages.find(m => m.id === msg.id)) {
+          // Identify new messages only to avoid redundant writes
+          const newMsgs = metaMsgs.filter(m => !messages.find(existing => existing.id === m.id));
+          if (newMsgs.length > 0) {
+            for (const msg of newMsgs) {
               await addMessage(msg);
             }
           }
@@ -79,9 +86,16 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
       }
     };
 
+    if (chatMessages.length === 0) setIsLoadingMessages(true);
     syncThread();
-    return () => { isMounted = false; };
-  }, [conversation.id, pages, messages]);
+
+    threadPollRef.current = window.setInterval(syncThread, 4000);
+
+    return () => { 
+      isMounted = false; 
+      if (threadPollRef.current) clearInterval(threadPollRef.current);
+    };
+  }, [conversation.id, pages]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -89,34 +103,19 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
     }
   }, [chatMessages]);
 
-  const blockRestrictedLinks = (text: string): boolean => {
-    if (isAdmin) return true;
-    const urlPattern = /(https?:\/\/[^\s]+)/g;
-    const foundUrls = text.match(urlPattern);
-    if (!foundUrls) return true;
-    const libraryUrls = [
-      ...approvedLinks.map(l => l.url.toLowerCase()),
-      ...approvedMedia.map(m => m.url.toLowerCase())
-    ];
-    return foundUrls.every(url => libraryUrls.includes(url.toLowerCase()));
-  };
-
   const handleSend = async (forcedText?: string) => {
     const textToSubmit = (forcedText || inputText).trim();
     if (!textToSubmit || isSending) return;
     
-    if (!blockRestrictedLinks(textToSubmit)) {
-      setLastError('Security: Only pre-approved assets allowed.');
-      return;
-    }
-
     setIsSending(true);
     setLastError(null);
     const currentPage = pages.find(p => p.id === conversation.pageId);
     
     try {
       if (currentPage && currentPage.accessToken) {
-        const response = await sendPageMessage(conversation.customerId, textToSubmit, currentPage.accessToken);
+        const tag = isWindowExpired ? "HUMAN_AGENT" : undefined;
+        const response = await sendPageMessage(conversation.customerId, textToSubmit, currentPage.accessToken, tag);
+        
         const newMessage: Message = {
           id: response.message_id || `msg-${Date.now()}`,
           conversationId: conversation.id,
@@ -132,17 +131,24 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
       if (!forcedText) setInputText('');
       setShowLibrary(false);
     } catch (err: any) {
-      setLastError(err.message || 'Meta API Error');
+      if (err.message?.includes('outside of allowed window') || err.code === 10) {
+        setLastError({ 
+          message: isWindowExpired 
+            ? "Policy Block: Window closed. Meta App requires 'Advanced Access' and 'HUMAN_AGENT' feature to reply now."
+            : "Policy Block: Message restricted. Ensure your app has full permissions.",
+          isPolicy: true
+        });
+      } else {
+        setLastError({ message: err.message || 'Meta API Error' });
+      }
     } finally {
       setIsSending(false);
     }
   };
 
-  const handleDeleteChat = async () => {
-    if (isAdmin && window.confirm("Permanently delete local chat history?")) {
-      await deleteConversation(conversation.id);
-      if (onDelete) onDelete();
-    }
+  const setStatus = (newStatus: ConversationStatus) => {
+    updateConversation(conversation.id, { status: newStatus });
+    setShowStatusMenu(false);
   };
 
   const getStatusStyle = (status: ConversationStatus) => {
@@ -154,14 +160,8 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
     }
   };
 
-  const setStatus = (newStatus: ConversationStatus) => {
-    updateConversation(conversation.id, { status: newStatus });
-    setShowStatusMenu(false);
-  };
-
   return (
     <div className="flex flex-col h-full bg-white relative overflow-hidden">
-      {/* Centered Modal Library */}
       {showLibrary && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 md:p-10 animate-in fade-in duration-300">
            <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" onClick={() => setShowLibrary(false)} />
@@ -171,7 +171,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
                    <div className="p-2 bg-blue-600 text-white rounded-xl shadow-lg shadow-blue-100">
                       <Library size={20} />
                    </div>
-                   <span className="text-sm font-black uppercase tracking-widest text-slate-800">Compliance Asset Library</span>
+                   <span className="text-sm font-black uppercase tracking-widest text-slate-800">Compliance Assets</span>
                 </div>
                 <button onClick={() => setShowLibrary(false)} className="p-2 hover:bg-white rounded-full transition-all text-slate-400">
                    <X size={24} />
@@ -180,11 +180,6 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
              
              <div className="flex-1 overflow-y-auto p-6 md:p-8 custom-scrollbar">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {approvedLinks.length > 0 && (
-                    <div className="col-span-full mb-2">
-                       <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-2">Verified Links</h4>
-                    </div>
-                  )}
                   {approvedLinks.map(link => (
                     <button onClick={() => handleSend(link.url)} key={link.id} className="text-left p-4 rounded-2xl border border-slate-100 hover:border-blue-500 hover:bg-blue-50 transition-all flex items-center gap-4 min-w-0 group bg-white">
                        <div className="p-3 bg-blue-50 text-blue-600 rounded-xl flex-shrink-0 group-hover:scale-110 transition-transform">
@@ -196,12 +191,6 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
                        </div>
                     </button>
                   ))}
-                  
-                  {approvedMedia.length > 0 && (
-                    <div className="col-span-full mt-4 mb-2">
-                       <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-2">Image Assets</h4>
-                    </div>
-                  )}
                   {approvedMedia.map(media => (
                     <button onClick={() => handleSend(media.url)} key={media.id} className="relative aspect-video rounded-3xl overflow-hidden border-2 border-slate-50 group shadow-sm">
                        <img src={media.url} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
@@ -211,18 +200,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
                        </div>
                     </button>
                   ))}
-
-                  {approvedLinks.length === 0 && approvedMedia.length === 0 && (
-                    <div className="col-span-full py-12 flex flex-col items-center text-slate-300">
-                       <ShieldAlert size={48} className="opacity-20 mb-4" />
-                       <p className="text-[10px] font-black uppercase tracking-widest">Library Empty</p>
-                    </div>
-                  )}
                 </div>
-             </div>
-             
-             <div className="p-6 bg-slate-50 border-t flex justify-center shrink-0">
-                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-tight">Only approved assets may be dispatched via this terminal.</p>
              </div>
            </div>
         </div>
@@ -240,49 +218,58 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
               {isLoadingMessages && <Loader2 size={12} className="animate-spin text-blue-400" />}
             </div>
             
-            <div className="relative inline-block">
-              <button 
-                onClick={() => setShowStatusMenu(!showStatusMenu)}
-                className={`flex items-center gap-1 px-2 py-0.5 rounded-lg border text-[8px] font-black uppercase tracking-wider transition-all ${getStatusStyle(conversation.status)}`}
-              >
-                {conversation.status}
-                <ChevronDown size={10} className="opacity-60" />
-              </button>
+            <div className="flex items-center gap-2">
+              <div className="relative inline-block">
+                <button 
+                  onClick={() => setShowStatusMenu(!showStatusMenu)}
+                  className={`flex items-center gap-1 px-2 py-0.5 rounded-lg border text-[8px] font-black uppercase tracking-wider transition-all ${getStatusStyle(conversation.status)}`}
+                >
+                  {conversation.status}
+                  <ChevronDown size={10} className="opacity-60" />
+                </button>
 
-              {showStatusMenu && (
-                <>
-                  <div className="fixed inset-0 z-40" onClick={() => setShowStatusMenu(false)}></div>
-                  <div className="absolute top-full left-0 mt-2 w-36 bg-white border border-slate-100 shadow-2xl rounded-2xl p-1 z-50 animate-in fade-in zoom-in-95 duration-150">
-                    {(Object.values(ConversationStatus)).map((status) => (
-                      <button
-                        key={status}
-                        onClick={() => setStatus(status)}
-                        className={`w-full flex items-center justify-between p-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-colors ${
-                          conversation.status === status ? 'bg-slate-50 text-slate-900' : 'text-slate-400 hover:bg-slate-50'
-                        }`}
-                      >
-                        <span className="flex items-center gap-2">
-                          <div className={`w-1.5 h-1.5 rounded-full ${
-                            status === ConversationStatus.OPEN ? 'bg-blue-500' : 
-                            status === ConversationStatus.PENDING ? 'bg-amber-500' : 'bg-emerald-500'
-                          }`}></div>
-                          {status}
-                        </span>
-                        {conversation.status === status && <Check size={10} className="text-blue-600" />}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
+                {showStatusMenu && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setShowStatusMenu(false)}></div>
+                    <div className="absolute top-full left-0 mt-2 w-36 bg-white border border-slate-100 shadow-2xl rounded-2xl p-1 z-50 animate-in fade-in zoom-in-95 duration-150">
+                      {(Object.values(ConversationStatus)).map((status) => (
+                        <button
+                          key={status}
+                          onClick={() => setStatus(status)}
+                          className={`w-full flex items-center justify-between p-2 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-colors ${
+                            conversation.status === status ? 'bg-slate-50 text-slate-900' : 'text-slate-400 hover:bg-slate-50'
+                          }`}
+                        >
+                          <span className="flex items-center gap-2">
+                            <div className={`w-1.5 h-1.5 rounded-full ${
+                              status === ConversationStatus.OPEN ? 'bg-blue-500' : 
+                              status === ConversationStatus.PENDING ? 'bg-amber-500' : 'bg-emerald-500'
+                            }`}></div>
+                            {status}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+              
+              <div className={`px-2 py-0.5 rounded-lg border text-[8px] font-black uppercase tracking-wider flex items-center gap-1 ${
+                isWindowExpired ? 'bg-amber-50 text-amber-600 border-amber-100' : 'bg-emerald-50 text-emerald-600 border-emerald-100'
+              }`}>
+                {isWindowExpired ? <Clock size={8} /> : <Zap size={8} className="animate-pulse" />}
+                {isWindowExpired ? '7d Window' : 'Live Window Open'}
+              </div>
             </div>
           </div>
         </div>
         
         {isAdmin && (
           <button 
-            onClick={handleDeleteChat}
+            onClick={() => {
+              if (window.confirm("Delete local chat?")) deleteConversation(conversation.id).then(() => onDelete?.());
+            }}
             className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"
-            title="Purge Local Chat"
           >
             <Trash2 size={18} />
           </button>
@@ -290,20 +277,6 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
       </div>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 md:p-8 space-y-4 md:space-y-6 bg-slate-50/20 custom-scrollbar">
-        {chatMessages.length === 0 && !isLoadingMessages && (
-          <div className="flex flex-col items-center justify-center py-20 text-slate-300 text-center">
-            <div className="w-16 h-16 bg-white rounded-2xl flex items-center justify-center shadow-sm border border-slate-100 mb-4">
-              <MessageSquare size={24} className="opacity-20" />
-            </div>
-            <p className="text-[10px] font-bold uppercase tracking-widest opacity-40">Direct Conversation Active</p>
-          </div>
-        )}
-        {isLoadingMessages && chatMessages.length === 0 && (
-          <div className="flex flex-col items-center justify-center py-20 text-blue-400/50">
-            <Loader2 size={32} className="animate-spin mb-4" />
-            <p className="text-[10px] font-black uppercase tracking-widest">Pulling History from Meta...</p>
-          </div>
-        )}
         {chatMessages.map((msg) => (
           <div key={msg.id} className={`flex flex-col ${msg.isIncoming ? 'items-start' : 'items-end'}`}>
             <div className={`max-w-[85%] md:max-w-[75%] p-3 md:p-4 rounded-2xl md:rounded-3xl text-sm leading-relaxed shadow-sm ${
@@ -322,8 +295,17 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
 
       <div className="p-4 md:p-8 border-t border-slate-100 bg-white shrink-0">
         {lastError && (
-          <div className="mb-4 p-3 bg-red-50 text-red-600 text-[10px] font-bold rounded-xl flex items-center gap-2 animate-shake border border-red-100">
-            <AlertCircle size={14} /> {lastError}
+          <div className={`mb-4 p-4 rounded-2xl flex items-start gap-3 animate-shake border ${
+            lastError.isPolicy ? 'bg-amber-50 text-amber-800 border-amber-200' : 'bg-red-50 text-red-600 border-red-100'
+          }`}>
+            <div className={`mt-0.5 shrink-0 ${lastError.isPolicy ? 'text-amber-500' : 'text-red-500'}`}>
+               {lastError.isPolicy ? <ShieldAlert size={16} /> : <AlertCircle size={16} />}
+            </div>
+            <div className="flex-1">
+              <p className="text-[11px] font-black uppercase tracking-widest mb-1">{lastError.isPolicy ? 'Meta Policy Block' : 'Error'}</p>
+              <p className="text-xs font-medium leading-relaxed">{lastError.message}</p>
+            </div>
+            <button onClick={() => setLastError(null)} className="p-1 hover:bg-black/5 rounded-lg"><X size={14} /></button>
           </div>
         )}
 
@@ -331,7 +313,6 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
            <button 
              onClick={() => setShowLibrary(true)}
              className={`p-3.5 md:p-4 rounded-xl md:rounded-2xl transition-all shrink-0 ${showLibrary ? 'bg-blue-600 text-white' : 'bg-slate-50 text-slate-400 hover:bg-blue-50'}`}
-             title="Verified Assets"
            >
              <Library size={20} />
            </button>
@@ -339,24 +320,23 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
              <textarea
                value={inputText}
                onChange={e => setInputText(e.target.value)}
-               className="w-full bg-slate-50 border border-slate-100 rounded-2xl md:rounded-3xl p-3 md:p-4 text-sm md:text-base outline-none focus:ring-4 focus:ring-blue-50 focus:border-blue-200 transition-all resize-none max-h-32 custom-scrollbar min-h-[48px]"
-               placeholder="Write a message..."
+               className="w-full bg-slate-50 border border-slate-100 rounded-2xl md:rounded-3xl p-3 md:p-4 text-sm md:text-base outline-none focus:ring-4 focus:ring-blue-50 focus:border-blue-200 transition-all resize-none min-h-[56px] max-h-[120px] custom-scrollbar"
+               placeholder={isWindowExpired ? "Window expired. HUMAN_AGENT tag active..." : "Type your response..."}
                rows={1}
-               style={{ fontSize: '16px' }} // Critical to prevent iOS zoom
                onKeyDown={(e) => {
-                 if (e.key === 'Enter' && !e.shiftKey && window.innerWidth > 768) {
+                 if (e.key === 'Enter' && !e.shiftKey) {
                    e.preventDefault();
                    handleSend();
                  }
                }}
              />
            </div>
-           <button
+           <button 
              onClick={() => handleSend()}
-             disabled={!inputText.trim() || isSending}
-             className="p-3.5 md:p-5 bg-blue-600 text-white rounded-xl md:rounded-[24px] shadow-lg shadow-blue-100 hover:bg-blue-700 disabled:opacity-40 transition-all flex-shrink-0"
+             disabled={isSending || !inputText.trim()}
+             className="p-3.5 md:p-4 bg-blue-600 text-white rounded-xl md:rounded-2xl hover:bg-blue-700 transition-all disabled:opacity-50 disabled:grayscale shrink-0 shadow-lg shadow-blue-100 active:scale-95"
            >
-             {isSending ? <Loader2 className="animate-spin" size={20} /> : <Send size={20} />}
+             {isSending ? <Loader2 size={20} className="animate-spin" /> : <Send size={20} />}
            </button>
         </div>
       </div>
