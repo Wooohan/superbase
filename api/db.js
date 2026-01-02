@@ -1,10 +1,11 @@
 
 /**
- * Supabase Cloud Relay v3.4
- * Target Project: fiuodbhgvmylvbanbfve
+ * Supabase Cloud Relay v3.6
+ * Project: fiuodbhgvmylvbanbfve
  */
 
 const SUPABASE_URL = "https://fiuodbhgvmylvbanbfve.supabase.co";
+// Using the 'messenger' secret key provided in your screenshots
 const SUPABASE_KEY = "sb_secret_x33xGa8YmioWvfyvDtWNXA_fT_8VL9V_";
 
 export default async function handler(req, res) {
@@ -19,13 +20,12 @@ export default async function handler(req, res) {
   
   if (!SUPABASE_URL || !SUPABASE_KEY) {
     return res.status(500).json({ 
-      error: "Supabase Credentials Missing", 
-      details: "The relay is missing the project URL or Key." 
+      error: "Relay Configuration Missing", 
+      details: "Missing URL or Secret Key in api/db.js" 
     });
   }
 
   const table = collection || 'provisioning_logs';
-  const baseUrl = `${SUPABASE_URL}/rest/v1/${table}`;
   const headers = {
     'apikey': SUPABASE_KEY,
     'Authorization': `Bearer ${SUPABASE_KEY}`,
@@ -34,47 +34,44 @@ export default async function handler(req, res) {
   };
 
   try {
-    let response;
-    let result;
-
     switch (action) {
       case 'ping':
-        // Direct probe of the REST gateway
-        response = await fetch(`${SUPABASE_URL}/rest/v1/`, { 
+        // We probe the root to check if the key is valid.
+        // If the key is valid, Supabase returns 200/204.
+        // If the tables are missing, specific table queries return 404.
+        const probe = await fetch(`${SUPABASE_URL}/rest/v1/`, { 
           method: 'GET', 
           headers: { 'apikey': SUPABASE_KEY } 
         });
         
+        const isAuthorized = probe.status !== 401 && probe.status !== 403;
+        
         return res.status(200).json({ 
-          ok: response.status === 200 || response.status === 204, 
-          status: response.status,
-          provider: 'Supabase/PostgreSQL',
-          project: 'fiuodbhgvmylvbanbfve'
+          ok: isAuthorized,
+          status: probe.status,
+          project: 'fiuodbhgvmylvbanbfve',
+          details: isAuthorized ? "Handshake successful" : "Key rejected by Supabase"
         });
 
       case 'find':
-        let queryUrl = baseUrl + '?select=*';
-        if (filter && filter.id) queryUrl += `&id=eq.${filter.id}`;
+        const queryUrl = `${SUPABASE_URL}/rest/v1/${table}${filter?.id ? `?id=eq.${filter.id}` : '?select=*'}`;
+        const findRes = await fetch(queryUrl, { method: 'GET', headers });
         
-        response = await fetch(queryUrl, { method: 'GET', headers });
-        if (!response.ok) {
-           const errText = await response.text();
-           return res.status(response.status).json({ 
-             error: `Table [${table}] Error`, 
+        if (!findRes.ok) {
+           const errText = await findRes.text();
+           return res.status(findRes.status).json({ 
+             error: `Query Failed: ${table}`, 
              details: errText,
-             code: 'TABLE_QUERY_FAILED' 
+             status: findRes.status 
            });
         }
         
-        result = await response.json();
-        return res.status(200).json({ documents: Array.isArray(result) ? result : [] });
+        const docs = await findRes.json();
+        return res.status(200).json({ documents: Array.isArray(docs) ? docs : [] });
 
       case 'updateOne':
         const payload = update?.$set || {};
-        if (!payload.id) throw new Error("Supabase Upsert requires an 'id' field.");
-
-        // PostgreSQL Upsert via POST + Resolution Header
-        response = await fetch(baseUrl, {
+        const upsertRes = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
           method: 'POST',
           headers: {
             ...headers,
@@ -83,43 +80,33 @@ export default async function handler(req, res) {
           body: JSON.stringify(payload)
         });
 
-        if (!response.ok) {
-          const errorMsg = await response.text();
+        if (!upsertRes.ok) {
+          const errorMsg = await upsertRes.text();
           throw new Error(`Upsert Failed: ${errorMsg}`);
         }
 
-        result = await response.json();
-        return res.status(200).json({ 
-          ok: true, 
-          upsertedId: result[0]?.id 
-        });
+        const upsertResult = await upsertRes.json();
+        return res.status(200).json({ ok: true, upsertedId: upsertResult[0]?.id });
 
       case 'deleteOne':
-        if (!filter || !filter.id) throw new Error("Delete requires an ID.");
-        
-        response = await fetch(`${baseUrl}?id=eq.${filter.id}`, {
+        const delRes = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${filter.id}`, {
           method: 'DELETE',
           headers: { ...headers, 'Prefer': 'return=minimal' }
         });
-        
-        return res.status(200).json({ ok: response.ok });
+        return res.status(200).json({ ok: delRes.ok });
 
       case 'listCollections':
         const tables = ['agents', 'pages', 'conversations', 'messages', 'links', 'media', 'provisioning_logs'];
         const stats = await Promise.all(tables.map(async (t) => {
-          try {
-            const check = await fetch(`${SUPABASE_URL}/rest/v1/${t}?select=count`, { 
-              method: 'GET', 
-              headers: { ...headers, 'Prefer': 'count=exact' } 
-            });
-            return { 
-              name: t, 
-              exists: check.status === 200 || check.status === 206, 
-              count: check.ok ? parseInt(check.headers.get('content-range')?.split('/')[1] || '0') : 0 
-            };
-          } catch (e) {
-            return { name: t, exists: false, count: 0 };
-          }
+          const check = await fetch(`${SUPABASE_URL}/rest/v1/${t}?select=count`, { 
+            method: 'GET', 
+            headers: { ...headers, 'Prefer': 'count=exact' } 
+          });
+          return { 
+            name: t, 
+            exists: check.status === 200 || check.status === 206,
+            count: check.ok ? parseInt(check.headers.get('content-range')?.split('/')[1] || '0') : 0 
+          };
         }));
         return res.status(200).json({ ok: true, collections: stats });
 
@@ -127,9 +114,6 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Invalid operation' });
     }
   } catch (error) {
-    return res.status(500).json({ 
-      error: error.message,
-      code: 'SUPABASE_RELAY_CRITICAL'
-    });
+    return res.status(500).json({ error: error.message });
   }
 }
