@@ -60,7 +60,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
       .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
   , [messages, conversation.id]);
 
-  // High-frequency polling for ACTIVE thread (every 4s)
+  // HIGH-FREQUENCY ACTIVE THREAD POLLING (Every 2.5 seconds)
   useEffect(() => {
     let isMounted = true;
     
@@ -71,7 +71,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
       try {
         const metaMsgs = await fetchThreadMessages(conversation.id, page.id, page.accessToken);
         if (isMounted) {
-          // Identify new messages only to avoid redundant writes
+          // Identify only new messages that aren't in local state already
           const newMsgs = metaMsgs.filter(m => !messages.find(existing => existing.id === m.id));
           if (newMsgs.length > 0) {
             for (const msg of newMsgs) {
@@ -80,7 +80,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
           }
         }
       } catch (err) {
-        console.error("Thread sync failed", err);
+        // Silent error for continuous polling to avoid flickering
       } finally {
         if (isMounted) setIsLoadingMessages(false);
       }
@@ -89,13 +89,14 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
     if (chatMessages.length === 0) setIsLoadingMessages(true);
     syncThread();
 
-    threadPollRef.current = window.setInterval(syncThread, 4000);
+    // Fast polling for the open chat (2500ms)
+    threadPollRef.current = window.setInterval(syncThread, 2500);
 
     return () => { 
       isMounted = false; 
       if (threadPollRef.current) clearInterval(threadPollRef.current);
     };
-  }, [conversation.id, pages]);
+  }, [conversation.id, pages, messages.length]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -131,16 +132,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
       if (!forcedText) setInputText('');
       setShowLibrary(false);
     } catch (err: any) {
-      if (err.message?.includes('outside of allowed window') || err.code === 10) {
-        setLastError({ 
-          message: isWindowExpired 
-            ? "Policy Block: Window closed. Meta App requires 'Advanced Access' and 'HUMAN_AGENT' feature to reply now."
-            : "Policy Block: Message restricted. Ensure your app has full permissions.",
-          isPolicy: true
-        });
-      } else {
-        setLastError({ message: err.message || 'Meta API Error' });
-      }
+      setLastError({ message: err.message || 'Meta API Error' });
     } finally {
       setIsSending(false);
     }
@@ -258,7 +250,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
                 isWindowExpired ? 'bg-amber-50 text-amber-600 border-amber-100' : 'bg-emerald-50 text-emerald-600 border-emerald-100'
               }`}>
                 {isWindowExpired ? <Clock size={8} /> : <Zap size={8} className="animate-pulse" />}
-                {isWindowExpired ? '7d Window' : 'Live Window Open'}
+                {isWindowExpired ? 'Archive View' : 'Live Polling Active'}
               </div>
             </div>
           </div>
@@ -267,7 +259,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
         {isAdmin && (
           <button 
             onClick={() => {
-              if (window.confirm("Delete local chat?")) deleteConversation(conversation.id).then(() => onDelete?.());
+              if (window.confirm("Archive local chat view?")) deleteConversation(conversation.id).then(() => onDelete?.());
             }}
             className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"
           >
@@ -295,14 +287,12 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
 
       <div className="p-4 md:p-8 border-t border-slate-100 bg-white shrink-0">
         {lastError && (
-          <div className={`mb-4 p-4 rounded-2xl flex items-start gap-3 animate-shake border ${
-            lastError.isPolicy ? 'bg-amber-50 text-amber-800 border-amber-200' : 'bg-red-50 text-red-600 border-red-100'
-          }`}>
-            <div className={`mt-0.5 shrink-0 ${lastError.isPolicy ? 'text-amber-500' : 'text-red-500'}`}>
-               {lastError.isPolicy ? <ShieldAlert size={16} /> : <AlertCircle size={16} />}
+          <div className={`mb-4 p-4 rounded-2xl flex items-start gap-3 animate-shake border bg-red-50 text-red-600 border-red-100`}>
+            <div className="mt-0.5 shrink-0 text-red-500">
+               <AlertCircle size={16} />
             </div>
             <div className="flex-1">
-              <p className="text-[11px] font-black uppercase tracking-widest mb-1">{lastError.isPolicy ? 'Meta Policy Block' : 'Error'}</p>
+              <p className="text-[11px] font-black uppercase tracking-widest mb-1">Send Error</p>
               <p className="text-xs font-medium leading-relaxed">{lastError.message}</p>
             </div>
             <button onClick={() => setLastError(null)} className="p-1 hover:bg-black/5 rounded-lg"><X size={14} /></button>
@@ -321,7 +311,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
                value={inputText}
                onChange={e => setInputText(e.target.value)}
                className="w-full bg-slate-50 border border-slate-100 rounded-2xl md:rounded-3xl p-3 md:p-4 text-sm md:text-base outline-none focus:ring-4 focus:ring-blue-50 focus:border-blue-200 transition-all resize-none min-h-[56px] max-h-[120px] custom-scrollbar"
-               placeholder={isWindowExpired ? "Window expired. HUMAN_AGENT tag active..." : "Type your response..."}
+               placeholder={isWindowExpired ? "Window expired. Deep Sync required..." : "Type your response..."}
                rows={1}
                onKeyDown={(e) => {
                  if (e.key === 'Enter' && !e.shiftKey) {
