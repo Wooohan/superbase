@@ -39,6 +39,11 @@ const InboxView: React.FC = () => {
 
   const activeConv = conversations.find(c => c.id === activeConvId) || null;
 
+  const handleQuickSync = () => {
+    // Only fetch top 5 manually too for speed
+    syncMetaConversations(5);
+  };
+
   const handleDeepSync = async () => {
     setIsDeepSyncing(true);
     await syncFullHistory();
@@ -74,30 +79,38 @@ const InboxView: React.FC = () => {
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-xl font-bold text-slate-800 tracking-tight">Inbox</h2>
-              {lastSyncTime && (
-                <div className="flex items-center gap-1 mt-1">
-                  <div className={`w-1.5 h-1.5 rounded-full ${isPolling ? 'bg-blue-500 animate-ping' : 'bg-emerald-500'}`}></div>
-                  <span className="text-[8px] font-black uppercase text-slate-400 tracking-widest">
-                    {isPolling ? 'Syncing...' : `Updated ${lastSyncTime}`}
-                  </span>
-                </div>
-              )}
+              <div className="flex items-center gap-1.5 mt-1">
+                <div className={`w-1.5 h-1.5 rounded-full ${isPolling ? 'bg-blue-500 animate-ping' : 'bg-emerald-500'}`}></div>
+                <span className="text-[8px] font-black uppercase text-slate-400 tracking-widest">
+                  {isPolling ? 'Syncing...' : lastSyncTime ? `Live • ${lastSyncTime}` : 'Connecting...'}
+                </span>
+              </div>
             </div>
-            <button 
-              onClick={handleDeepSync}
-              disabled={isDeepSyncing}
-              title="Deep Sync All History"
-              className="p-2.5 bg-white border border-slate-200 text-slate-500 rounded-xl hover:bg-slate-900 hover:text-white transition-all shadow-sm active:scale-90"
-            >
-              {isDeepSyncing ? <Loader2 size={16} className="animate-spin" /> : <History size={16} />}
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button 
+                onClick={handleQuickSync}
+                disabled={isPolling}
+                title="Quick Refresh (Top 5)"
+                className="p-2 bg-white border border-slate-200 text-blue-600 rounded-xl hover:bg-blue-600 hover:text-white transition-all shadow-sm active:scale-90 disabled:opacity-50"
+              >
+                {isPolling ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+              </button>
+              <button 
+                onClick={handleDeepSync}
+                disabled={isDeepSyncing}
+                title="Sync All History"
+                className="p-2 bg-white border border-slate-200 text-slate-500 rounded-xl hover:bg-slate-900 hover:text-white transition-all shadow-sm active:scale-90 disabled:opacity-50"
+              >
+                {isDeepSyncing ? <Loader2 size={16} className="animate-spin" /> : <History size={16} />}
+              </button>
+            </div>
           </div>
           
           <div className="relative group">
             <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-blue-500 transition-colors" size={16} />
             <input 
               type="text" 
-              placeholder="Search chats..."
+              placeholder="Search customers..."
               className="w-full pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm outline-none shadow-sm focus:ring-4 focus:ring-blue-50 focus:border-blue-400 transition-all"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
@@ -124,7 +137,6 @@ const InboxView: React.FC = () => {
         <div className="flex-1 overflow-y-auto custom-scrollbar px-3 md:px-4 pb-8 space-y-2">
           {visibleConversations.length > 0 ? (
             visibleConversations.map((conv) => {
-              const page = pages.find(p => p.id === conv.pageId);
               const isActive = activeConv?.id === conv.id;
               
               return (
@@ -161,9 +173,6 @@ const InboxView: React.FC = () => {
                         <span className={`px-2 py-0.5 rounded-lg text-[8px] font-black uppercase tracking-tighter border shrink-0 ${getStatusColor(conv.status)}`}>
                           {conv.status}
                         </span>
-                        <div className="flex items-center gap-1 text-[8px] font-bold text-slate-400 uppercase tracking-widest bg-slate-50 border border-slate-100 px-1.5 py-0.5 rounded-lg truncate max-w-[100px]">
-                           {page?.name || 'Page'}
-                        </div>
                       </div>
                     </div>
                   </div>
@@ -173,7 +182,7 @@ const InboxView: React.FC = () => {
           ) : (
             <div className="flex flex-col items-center justify-center py-20 text-slate-300">
               <MessageSquareOff size={32} className="opacity-20 mb-3" />
-              <p className="text-[10px] font-black uppercase tracking-widest opacity-40 text-center px-4">No conversations found</p>
+              <p className="text-[10px] font-black uppercase tracking-widest opacity-40 text-center px-4">No conversations</p>
             </div>
           )}
         </div>
@@ -196,9 +205,9 @@ const InboxView: React.FC = () => {
              <div className="w-24 h-24 bg-white rounded-[40px] flex items-center justify-center mb-8 shadow-sm border border-slate-100">
                <Zap size={32} className="text-blue-200" />
              </div>
-             <h3 className="text-slate-800 font-bold mb-2">Workspace Ready</h3>
+             <h3 className="text-slate-800 font-bold mb-2">Live Inbox Active</h3>
              <p className="text-[11px] font-black uppercase tracking-widest text-slate-400 max-w-[240px] leading-relaxed">
-               Background syncing is active. New messages will appear automatically.
+               Incoming messages will appear automatically at the top. Polling restricted to top 5 for speed.
              </p>
           </div>
         )}
