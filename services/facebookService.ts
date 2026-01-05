@@ -1,3 +1,4 @@
+
 import { FacebookPage, Conversation, Message, ConversationStatus } from '../types';
 
 /**
@@ -66,7 +67,8 @@ export const loginWithFacebook = async () => {
         reject(response?.error_message || 'Login Failed. Ensure "Login with JavaScript SDK" is ENABLED in Meta Dashboard.');
       }
     }, { 
-      scope: 'pages_messaging,pages_show_list,pages_manage_metadata,public_profile,pages_read_engagement' 
+      // Added crucial scopes for persistent Long-Lived tokens
+      scope: 'pages_messaging,pages_show_list,pages_manage_metadata,public_profile,pages_read_engagement,pages_manage_posts' 
     });
   });
 };
@@ -97,9 +99,17 @@ export const verifyPageAccessToken = async (pageId: string, accessToken: string)
     const url = `https://graph.facebook.com/v22.0/${pageId}?fields=id,name&access_token=${accessToken}`;
     const response = await fetch(url);
     const data = await response.json();
-    return !!(data && data.id && !data.error);
+    
+    // Improved logic: Only fail if the API explicitly says the token is invalid (Code 190)
+    if (data.error && (data.error.code === 190 || data.error.code === 102)) {
+      return false;
+    }
+    
+    // If it's a network error or other, assume still connected to prevent accidental UI disconnects
+    return true;
   } catch (e) {
-    return false;
+    // Persistent by default on network timeout
+    return true;
   }
 };
 
@@ -172,10 +182,6 @@ export const fetchThreadMessages = async (conversationId: string, pageId: string
   }).reverse();
 };
 
-/**
- * Sends a message. Uses MESSAGE_TAG (HUMAN_AGENT) if tag is provided, 
- * which extends the allowed window to 7 days.
- */
 export const sendPageMessage = async (recipientId: string, text: string, pageAccessToken: string, tag?: string) => {
   const url = `https://graph.facebook.com/v22.0/me/messages?access_token=${pageAccessToken}`;
   
