@@ -83,7 +83,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const pollIntervalRef = useRef<number | null>(null);
   const convsRef = useRef<Conversation[]>([]);
 
-  // Keep ref in sync for comparison logic
   useEffect(() => {
     convsRef.current = conversations;
   }, [conversations]);
@@ -99,10 +98,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setDbLogs(prev => [newLog, ...prev].slice(0, 50));
   };
 
-  /**
-   * background sync optimized to only fetch 5 conversations.
-   * It also checks if the conversation has actually updated before writing to Supabase.
-   */
   const syncMetaConversations = async (limit: number = 5) => {
     if (pages.length === 0 || isPolling) return;
     setIsPolling(true);
@@ -114,7 +109,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         try {
           const meta = await fetchPageConversations(page.id, page.accessToken, limit, true);
           
-          // Only update database for conversations that are NEW or have NEW snippet timestamp
           const updates = meta.filter(mConv => {
             const existing = convsRef.current.find(c => c.id === mConv.id);
             if (!existing) return true;
@@ -126,13 +120,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             await Promise.all(updates.map(c => apiService.put('conversations', c)));
           }
         } catch (e) {
-          console.error(`Sync failed for ${page.name}`, e);
+          // If 401/403, we still keep the page but log it to avoid disconnecting active sessions
+          console.warn(`Soft Sync failed for ${page.name}`, e);
         }
       });
 
       await Promise.all(syncPromises);
       
-      // If any of the top 5 changed, refresh the whole local list from DB
       if (hasChanges || limit > 5) {
         const all = await apiService.getAll<Conversation>('conversations');
         setConversations(all);
@@ -140,16 +134,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       
       setLastSyncTime(new Date().toLocaleTimeString());
     } catch (err: any) {
-      addLog('error', 'Sync Engine Exception', err.message);
+      addLog('error', 'Turbo Sync Engine Exception', err.message);
     } finally {
       setIsPolling(false);
     }
   };
 
   const syncFullHistory = async () => {
-    addLog('info', 'Deep Sync: Fetching 50+ users from Meta...');
+    addLog('info', 'Deep History Sync: Pulling 50+ users from Meta...');
     await syncMetaConversations(50);
-    addLog('success', 'Deep Sync Complete');
+    addLog('success', 'Deep History Loaded');
   };
 
   const loadDataFromCloud = async () => {
@@ -172,7 +166,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setApprovedMedia(mediaData);
       
       setDbStatus('connected');
-      addLog('success', 'Workspace Live');
+      addLog('success', 'Real-time Infrastructure Connected');
 
       const session = localStorage.getItem(USER_SESSION_KEY);
       if (session) setCurrentUser(JSON.parse(session));
@@ -182,14 +176,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   };
 
-  // Automated Background Sync Engine (Quick poll top 5)
+  // High-Frequency Turbo Poll (5 seconds for Inbox top 5)
+  // For individual chats, a faster poll is triggered inside ChatWindow.tsx
   useEffect(() => {
     if (dbStatus === 'connected' && currentUser && pages.length > 0) {
-      // Immediate quick sync
       syncMetaConversations(5);
 
-      // High-frequency polling for the inbox (top 5 users)
-      // Faster polling (5s) for a snappier feel
       pollIntervalRef.current = window.setInterval(() => {
         syncMetaConversations(5);
       }, 5000);
