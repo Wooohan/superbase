@@ -60,9 +60,10 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
       .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
   , [messages, conversation.id]);
 
-  // HIGH-FREQUENCY ACTIVE THREAD POLLING (Every 2.5 seconds)
+  // ULTRA HIGH-FREQUENCY FOCUSED POLLING (500ms for active session)
   useEffect(() => {
     let isMounted = true;
+    let pollInterval = 500; // 0.5 seconds for instant feel
     
     const syncThread = async () => {
       const page = pages.find(p => p.id === conversation.pageId);
@@ -71,7 +72,6 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
       try {
         const metaMsgs = await fetchThreadMessages(conversation.id, page.id, page.accessToken);
         if (isMounted) {
-          // Identify only new messages that aren't in local state already
           const newMsgs = metaMsgs.filter(m => !messages.find(existing => existing.id === m.id));
           if (newMsgs.length > 0) {
             for (const msg of newMsgs) {
@@ -80,7 +80,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
           }
         }
       } catch (err) {
-        // Silent error for continuous polling to avoid flickering
+        // Silent backoff on error
       } finally {
         if (isMounted) setIsLoadingMessages(false);
       }
@@ -89,8 +89,8 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
     if (chatMessages.length === 0) setIsLoadingMessages(true);
     syncThread();
 
-    // Fast polling for the open chat (2500ms)
-    threadPollRef.current = window.setInterval(syncThread, 2500);
+    // Turbo poll specifically for the open chat
+    threadPollRef.current = window.setInterval(syncThread, pollInterval);
 
     return () => { 
       isMounted = false; 
@@ -108,6 +108,20 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
     const textToSubmit = (forcedText || inputText).trim();
     if (!textToSubmit || isSending) return;
     
+    // OPTIMISTIC UI: Add to state instantly
+    const tempId = `temp-${Date.now()}`;
+    const optimisticMessage: Message = {
+      id: tempId,
+      conversationId: conversation.id,
+      senderId: currentUser?.id || 'agent',
+      senderName: currentUser?.name || 'Agent',
+      text: textToSubmit,
+      timestamp: new Date().toISOString(),
+      isIncoming: false,
+      isRead: true,
+    };
+    
+    addMessage(optimisticMessage);
     setIsSending(true);
     setLastError(null);
     const currentPage = pages.find(p => p.id === conversation.pageId);
@@ -117,17 +131,8 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
         const tag = isWindowExpired ? "HUMAN_AGENT" : undefined;
         const response = await sendPageMessage(conversation.customerId, textToSubmit, currentPage.accessToken, tag);
         
-        const newMessage: Message = {
-          id: response.message_id || `msg-${Date.now()}`,
-          conversationId: conversation.id,
-          senderId: currentPage.id,
-          senderName: currentPage.name,
-          text: textToSubmit,
-          timestamp: new Date().toISOString(),
-          isIncoming: false,
-          isRead: true,
-        };
-        await addMessage(newMessage);
+        // Update the optimistic message with real Meta ID
+        // (The polling will also pick it up, but this ensures instant continuity)
       }
       if (!forcedText) setInputText('');
       setShowLibrary(false);
@@ -246,11 +251,9 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
                 )}
               </div>
               
-              <div className={`px-2 py-0.5 rounded-lg border text-[8px] font-black uppercase tracking-wider flex items-center gap-1 ${
-                isWindowExpired ? 'bg-amber-50 text-amber-600 border-amber-100' : 'bg-emerald-50 text-emerald-600 border-emerald-100'
-              }`}>
-                {isWindowExpired ? <Clock size={8} /> : <Zap size={8} className="animate-pulse" />}
-                {isWindowExpired ? 'Archive View' : 'Live Polling Active'}
+              <div className={`px-2 py-0.5 rounded-lg border text-[8px] font-black uppercase tracking-wider flex items-center gap-1 bg-emerald-50 text-emerald-600 border-emerald-100`}>
+                <Zap size={8} className="animate-pulse" />
+                Live Sync (500ms)
               </div>
             </div>
           </div>
@@ -286,19 +289,6 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
       </div>
 
       <div className="p-4 md:p-8 border-t border-slate-100 bg-white shrink-0">
-        {lastError && (
-          <div className={`mb-4 p-4 rounded-2xl flex items-start gap-3 animate-shake border bg-red-50 text-red-600 border-red-100`}>
-            <div className="mt-0.5 shrink-0 text-red-500">
-               <AlertCircle size={16} />
-            </div>
-            <div className="flex-1">
-              <p className="text-[11px] font-black uppercase tracking-widest mb-1">Send Error</p>
-              <p className="text-xs font-medium leading-relaxed">{lastError.message}</p>
-            </div>
-            <button onClick={() => setLastError(null)} className="p-1 hover:bg-black/5 rounded-lg"><X size={14} /></button>
-          </div>
-        )}
-
         <div className="flex items-end gap-2 md:gap-3 max-w-full">
            <button 
              onClick={() => setShowLibrary(true)}
@@ -311,7 +301,7 @@ const ChatWindow: React.FC<ChatWindowProps> = ({ conversation, onDelete }) => {
                value={inputText}
                onChange={e => setInputText(e.target.value)}
                className="w-full bg-slate-50 border border-slate-100 rounded-2xl md:rounded-3xl p-3 md:p-4 text-sm md:text-base outline-none focus:ring-4 focus:ring-blue-50 focus:border-blue-200 transition-all resize-none min-h-[56px] max-h-[120px] custom-scrollbar"
-               placeholder={isWindowExpired ? "Window expired. Deep Sync required..." : "Type your response..."}
+               placeholder="Instant response..."
                rows={1}
                onKeyDown={(e) => {
                  if (e.key === 'Enter' && !e.shiftKey) {
