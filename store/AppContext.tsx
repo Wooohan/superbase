@@ -56,7 +56,6 @@ interface AppContextType {
   isPolling: boolean;
   refreshMetadata: () => Promise<void>;
   dashboardStats: any;
-  // Added methods required for system maintenance and settings
   forceWriteTest: () => Promise<boolean>;
   clearLocalChats: () => Promise<void>;
 }
@@ -82,6 +81,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [isPolling, setIsPolling] = useState(false);
 
   const pollIntervalRef = useRef<number | null>(null);
+  const convsRef = useRef<Conversation[]>([]);
+
+  // Keep ref in sync for comparison logic
+  useEffect(() => {
+    convsRef.current = conversations;
+  }, [conversations]);
 
   const addLog = (type: 'info' | 'error' | 'success', message: string, details?: string) => {
     const newLog: SystemLog = {
@@ -94,52 +99,61 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setDbLogs(prev => [newLog, ...prev].slice(0, 50));
   };
 
-  const refreshMetadata = async () => {
-    try {
-      const collections = await apiService.getDbMetadata();
-      setDbCollections(collections);
-    } catch (e: any) {
-      addLog('error', 'Metadata Refresh Failed', e.message);
-    }
-  };
-
-  const syncMetaConversations = async (limit: number = 20) => {
-    if (pages.length === 0) return;
+  /**
+   * background sync optimized to only fetch 5 conversations.
+   * It also checks if the conversation has actually updated before writing to Supabase.
+   */
+  const syncMetaConversations = async (limit: number = 5) => {
+    if (pages.length === 0 || isPolling) return;
     setIsPolling(true);
     
     try {
+      let hasChanges = false;
       const syncPromises = pages.map(async (page) => {
-        if (!page.accessToken) return [];
+        if (!page.accessToken) return;
         try {
           const meta = await fetchPageConversations(page.id, page.accessToken, limit, true);
-          // Parallelize writes to Supabase
-          await Promise.all(meta.map(c => apiService.put('conversations', c)));
-          return meta;
+          
+          // Only update database for conversations that are NEW or have NEW snippet timestamp
+          const updates = meta.filter(mConv => {
+            const existing = convsRef.current.find(c => c.id === mConv.id);
+            if (!existing) return true;
+            return new Date(mConv.lastTimestamp).getTime() > new Date(existing.lastTimestamp).getTime();
+          });
+
+          if (updates.length > 0) {
+            hasChanges = true;
+            await Promise.all(updates.map(c => apiService.put('conversations', c)));
+          }
         } catch (e) {
-          console.error(`Sync failed for page ${page.id}`, e);
-          return [];
+          console.error(`Sync failed for ${page.name}`, e);
         }
       });
 
       await Promise.all(syncPromises);
       
-      // Refresh local state from Cloud
-      const all = await apiService.getAll<Conversation>('conversations');
-      setConversations(all);
+      // If any of the top 5 changed, refresh the whole local list from DB
+      if (hasChanges || limit > 5) {
+        const all = await apiService.getAll<Conversation>('conversations');
+        setConversations(all);
+      }
+      
       setLastSyncTime(new Date().toLocaleTimeString());
-      addLog('success', 'Background Sync Complete', `Updated ${all.length} conversations`);
     } catch (err: any) {
-      addLog('error', 'Auto-Sync Error', err.message);
+      addLog('error', 'Sync Engine Exception', err.message);
     } finally {
       setIsPolling(false);
     }
   };
 
+  const syncFullHistory = async () => {
+    addLog('info', 'Deep Sync: Fetching 50+ users from Meta...');
+    await syncMetaConversations(50);
+    addLog('success', 'Deep Sync Complete');
+  };
+
   const loadDataFromCloud = async () => {
     setDbStatus('syncing');
-    setDbError(null);
-    addLog('info', 'Connecting to Workspace...');
-    
     try {
       const [agentsData, pagesData, convsData, msgsData, linksData, mediaData] = await Promise.all([
         apiService.getAll<User>('agents'),
@@ -158,27 +172,27 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setApprovedMedia(mediaData);
       
       setDbStatus('connected');
-      addLog('success', 'Cloud Connection Active');
+      addLog('success', 'Workspace Live');
 
       const session = localStorage.getItem(USER_SESSION_KEY);
       if (session) setCurrentUser(JSON.parse(session));
     } catch (err: any) {
       setDbStatus('error');
       setDbError(err.message);
-      addLog('error', 'Cloud Load Error', err.message);
     }
   };
 
-  // Automated Polling Engine
+  // Automated Background Sync Engine (Quick poll top 5)
   useEffect(() => {
     if (dbStatus === 'connected' && currentUser && pages.length > 0) {
-      // Immediate sync
-      syncMetaConversations(10);
+      // Immediate quick sync
+      syncMetaConversations(5);
 
-      // Setup 15s interval for background updates
+      // High-frequency polling for the inbox (top 5 users)
+      // Faster polling (5s) for a snappier feel
       pollIntervalRef.current = window.setInterval(() => {
-        syncMetaConversations(10);
-      }, 15000);
+        syncMetaConversations(5);
+      }, 5000);
 
       return () => {
         if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
@@ -189,27 +203,6 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   useEffect(() => {
     loadDataFromCloud();
   }, []);
-
-  // Added missing implementation for system settings methods
-  const forceWriteTest = async (): Promise<boolean> => {
-    try {
-      addLog('info', 'Executing manual handshake test...');
-      const result = await apiService.manualWriteToTest();
-      if (result) {
-        addLog('success', 'Manual Handshake Verified');
-      }
-      return result;
-    } catch (e: any) {
-      addLog('error', 'Handshake Test Failed', e.message);
-      return false;
-    }
-  };
-
-  const clearLocalChats = async () => {
-    localStorage.removeItem(USER_SESSION_KEY);
-    addLog('info', 'Local cache purged. Resetting session...');
-    window.location.reload();
-  };
 
   const value: AppContextType = {
     currentUser, setCurrentUser,
@@ -234,10 +227,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setConversations(prev => prev.filter(c => c.id !== id));
     },
     messages,
-    addMessage: async (m) => { await apiService.put('messages', m); setMessages(p => [...p, m]); },
+    addMessage: async (m) => { 
+      setMessages(prev => {
+        if (prev.find(existing => existing.id === m.id)) return prev;
+        return [...prev, m];
+      });
+      await apiService.put('messages', m); 
+    },
     bulkAddMessages: async (msgs) => {
       await Promise.all(msgs.map(m => apiService.put('messages', m)));
-      setMessages(prev => [...prev, ...msgs]);
+      setMessages(prev => {
+        const existingIds = new Set(prev.map(m => m.id));
+        const uniqueNew = msgs.filter(m => !existingIds.has(m.id));
+        return [...prev, ...uniqueNew];
+      });
     },
     agents,
     addAgent: async (a) => { await apiService.put('agents', a); setAgents(prev => [...prev, a]); },
@@ -264,10 +267,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     },
     logout: async () => { localStorage.removeItem(USER_SESSION_KEY); setCurrentUser(null); },
     syncMetaConversations,
-    syncFullHistory: async () => {
-      addLog('info', 'Deep Sync Initiated...');
-      await syncMetaConversations(100); 
-    },
+    syncFullHistory,
     verifyPageConnection: async (id) => {
       const page = pages.find(p => p.id === id);
       return page ? await verifyPageAccessToken(id, page.accessToken) : false;
@@ -285,7 +285,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     dbCollections,
     lastSyncTime,
     isPolling,
-    refreshMetadata,
+    refreshMetadata: async () => {
+      const collections = await apiService.getDbMetadata();
+      setDbCollections(collections);
+    },
     dashboardStats: {
       openChats: conversations.filter(c => c.status === ConversationStatus.OPEN).length,
       avgResponseTime: "0m 45s",
@@ -293,9 +296,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       csat: "99%",
       chartData: [{ name: 'Mon', conversations: 14 }, { name: 'Tue', conversations: 28 }, { name: 'Wed', conversations: 31 }, { name: 'Thu', conversations: 19 }, { name: 'Fri', conversations: 44 }]
     },
-    // Added value object mappings for new methods
-    forceWriteTest,
-    clearLocalChats
+    forceWriteTest: async () => {
+      try {
+        return await apiService.manualWriteToTest();
+      } catch (e) {
+        return false;
+      }
+    },
+    clearLocalChats: async () => {
+      localStorage.removeItem(USER_SESSION_KEY);
+      window.location.reload();
+    }
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
